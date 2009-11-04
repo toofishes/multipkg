@@ -26,11 +26,29 @@
 # THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 # TODO list:
-# * XXX Support multiple cache directories (but keep sane default)
+# * Support configuration in some fashion of cache directories
 # * Support binding to only certain interfaces
-# * Have group awareness so we can timeout before 0.500 seconds
-#   if everyone has responded
 # * Add a default mirror capability
+# * Improve group awareness. We should look at sending out pings/pongs
+#   and expiring hosts we don't hear from. A few UDP packages every minute
+#   won't hurt anyone.
+# * Allow for some fallback to known hosts. This would involve sending
+#   a UDP packet directly to a host rather than the multicast address, and
+#   then having that host act as a bridge.
+#
+#   [Machine A] <--- UDP unicast ---> [Machine B]     [Machine C]
+#                                                \   /
+#                                           <UDP multicast>
+#                                                  |
+#                                             [Machine D]
+#
+# * To do the above, we will probably have to beef up the data sent on
+#   the wire. It might be smart to pickle something up where the following
+#   keys are known:
+#     - req: ping, pong, gone, search, found, notfound
+#     - pkg: package name if it makes sense
+#     - dest: dest address so we can determine multicast/unicast
+#     - reqid: some unique ID so we don't propagate too many packets?
 
 from __future__ import with_statement
 
@@ -63,26 +81,30 @@ cachedirs = [ "/var/cache/pacman/pkg",
               "/var/cache/makepkg/pkg" ]
 
 class PackageRequest():
-    def __init__(self, queue, package):
+    def __init__(self, queue, package, known):
         print "new request: %s" % package
         self.event = threading.Event()
         self.queue = queue
         self.pkgname = package
+        self.known_servers = known
         self.address = None
 
     def wait(self):
         self.event.wait(0.500)
+        print "request done waiting, address %s servers remaining %d" % (self.address, len(self.known_servers))
         queue.remove(self)
         return self.address
 
 
 class PackageRequestQueue():
     requests = []
+    known_servers = set()
     lock = threading.Lock()
 
     def new(self, package):
         with self.lock:
-            ret = PackageRequest(self, package)
+            ret = PackageRequest(
+                    self, package, self.known_servers.copy())
             self.requests.append(ret)
             return ret
 
@@ -94,15 +116,33 @@ class PackageRequestQueue():
                     r.event.set()
 
     def notfound(self, package, address):
-        # TODO
-        pass
+        with self.lock:
+            for r in self.requests:
+                if r.pkgname == package:
+                    r.known_servers.discard(address)
+                    # if we don't know of any more servers, clear the flag
+                    if len(r.known_servers) == 0:
+                        r.event.set()
     
     def remove(self, item):
         with self.lock:
             self.requests.remove(item)
 
+    def reset_servers(self):
+        with self.lock:
+            self.known_servers.clear()
+
+    def add_server(self, server):
+        with self.lock:
+            self.known_servers.add(server)
+
+    def remove_server(self, server):
+        with self.lock:
+            self.known_servers.discard(server)
+
     def debug(self):
         print repr(self.requests)
+        print repr(self.known_servers)
 
 def find_package(pkgfile):
     for dir in cachedirs:
@@ -115,6 +155,7 @@ def find_package(pkgfile):
 def find_remote_package(pkgfile):
     print "multicast search: %s" % pkgfile
     mcastserver.write("search:%s" % pkgfile, MCAST)
+    queue.debug()
 
 class MulticastPackageFinder(DatagramProtocol):
     def __init__(self, queue):
@@ -153,7 +194,8 @@ class MulticastPackageFinder(DatagramProtocol):
         * pong - sender is announcing presence in cluster
         * gone - sender is about to shutdown and leave cluster
         '''
-        print "received: %s %s" % (address[0], datagram)
+        addr = address[0]
+        print "received: %s %s" % (addr, datagram)
         type, contents = self.parse_message(datagram)
         if type == "search":
             path = find_package(contents)
@@ -162,15 +204,17 @@ class MulticastPackageFinder(DatagramProtocol):
             else:
                 self.send("notfound:%s" % contents)
         elif type == "found":
-            self.queue.found(contents, address[0])
+            self.queue.found(contents, addr)
         elif type == "notfound":
-            self.queue.notfound(contents, address[0])
+            self.queue.notfound(contents, addr)
         elif type == "ping":
+            self.queue.reset_servers()
+            self.queue.add_server(addr)
             self.send("pong:")
         elif type == "pong":
-            pass
+            self.queue.add_server(addr)
         elif type == "gone":
-            pass
+            self.queue.remove_server(addr)
 
 
 class MulticastPackageResource(Resource):
@@ -242,18 +286,18 @@ class CacheResource(Resource):
             return File(localpath)
         return NoResource()
  
-log.startLogging(sys.stdout)
 
-queue = PackageRequestQueue()
+if __name__ == '__main__':
+    log.startLogging(sys.stdout)
+    queue = PackageRequestQueue()
+    httproot = Resource()
+    httproot.putChild("search", SearchResource(queue))
+    httproot.putChild("cache", CacheResource())
 
-httproot = Resource()
-httproot.putChild("search", SearchResource(queue))
-httproot.putChild("cache", CacheResource())
+    # get our various listeners, clients, etc. set up
+    mcastserver = reactor.listenMulticast(DEF_PORT, MulticastPackageFinder(queue))
+    httpserver = reactor.listenTCP(DEF_PORT, Site(httproot))
 
-# get our various listeners, clients, etc. set up
-mcastserver = reactor.listenMulticast(DEF_PORT, MulticastPackageFinder(queue))
-httpserver = reactor.listenTCP(DEF_PORT, Site(httproot))
-
-reactor.run()
+    reactor.run()
 
 # vim: set et:
