@@ -53,6 +53,7 @@
 from __future__ import with_statement
 
 import os, re, socket, threading
+import time
 import sys
 
 try:
@@ -73,14 +74,65 @@ from twisted.web.static import File
 from twisted.web.util import Redirect
 from twisted.web.error import NoResource
 
-DEF_ADDR = '224.0.0.156'
+DEF_ADDR = '239.0.0.156'
 DEF_PORT = 8954
 MCAST = (DEF_ADDR, DEF_PORT)
 
 cachedirs = [ "/var/cache/pacman/pkg",
               "/var/cache/makepkg/pkg" ]
 
-class PackageRequest():
+
+class KnownServer(object):
+    def __init__(self, address, contact_address=None):
+        self.last = time.time()
+        self.address = address
+        if contact_address:
+            self.contact_address = contact_address
+        else:
+            self.contact_address = address
+
+
+class ServerCache(object):
+    '''
+    This class is meant to hold a cache of servers we know about *and* have
+    heard from in a configured time interval. This is to ensure we have a
+    relatively fresh list of servers without having to constantly poll.
+    '''
+    known_servers = dict()
+    lock = threading.Lock()
+
+    def __init__(self, timeout=60):
+        self.timeout = timeout
+
+    def add(self, from_addr, contact_addr=None):
+        s = KnownServer(from_addr, contact_addr)
+        with self.lock:
+            self.known_servers[from_addr] = s
+
+    def remove(self, from_addr, contact_addr=None):
+        with self.lock:
+            if from_addr in self.known_servers:
+                del self.known_servers[from_addr]
+
+    def get_current(self):
+        '''
+        Get a list of servers we know about and should be available. This
+        method is also responsible for doing the lazy sweep of the dict for
+        dead servers.
+        '''
+        cutoff = time.time() - self.timeout
+        ret = set()
+        with self.lock:
+            for k in self.known_servers.keys():
+                s = self.known_servers[k]
+                if s.last < cutoff:
+                    del self.known_servers[k]
+                else:
+                    ret.add(s.address)
+        return ret
+
+
+class PackageRequest(object):
     def __init__(self, queue, package, known):
         print "new request: %s" % package
         self.event = threading.Event()
@@ -91,22 +143,23 @@ class PackageRequest():
 
     def wait(self):
         self.event.wait(0.500)
-        print "request done waiting, address %s servers remaining %d" % (self.address, len(self.known_servers))
+        print "request done waiting, address %s servers remaining %d" \
+                % (self.address, len(self.known_servers))
         queue.remove(self)
         return self.address
 
 
 class PackageRequestQueue():
     requests = []
-    known_servers = set()
+    server_cache = ServerCache()
     lock = threading.Lock()
 
     def new(self, package):
+        servers = self.server_cache.get_current()
+        ret = PackageRequest(self, package, servers)
         with self.lock:
-            ret = PackageRequest(
-                    self, package, self.known_servers.copy())
             self.requests.append(ret)
-            return ret
+        return ret
 
     def found(self, package, address):
         with self.lock:
@@ -128,21 +181,16 @@ class PackageRequestQueue():
         with self.lock:
             self.requests.remove(item)
 
-    def reset_servers(self):
-        with self.lock:
-            self.known_servers.clear()
-
     def add_server(self, server):
-        with self.lock:
-            self.known_servers.add(server)
+        self.server_cache.add(server)
 
     def remove_server(self, server):
-        with self.lock:
-            self.known_servers.discard(server)
+        self.server_cache.remove(server)
 
     def debug(self):
         print repr(self.requests)
-        print repr(self.known_servers)
+        print repr(self.server_cache.known_servers)
+
 
 def find_package(pkgfile):
     for dir in cachedirs:
@@ -152,35 +200,46 @@ def find_package(pkgfile):
                 return path
     return None
 
-def find_remote_package(pkgfile):
-    print "multicast search: %s" % pkgfile
-    mcastserver.write("search:%s" % pkgfile, MCAST)
-    queue.debug()
-
 class MulticastPackageFinder(DatagramProtocol):
     def __init__(self, queue):
         self.queue = queue
 
+    def build_message(self, type, dest=DEF_ADDR, pkg=None):
+        message = { "type": type, "dest": dest, "pkg": pkg }
+        message = pickle.dumps(message)
+        addr = (dest, DEF_PORT)
+        self.transport.write(message, addr)
+
+    def parse_message(self, message):
+        try:
+            parsed = pickle.loads(message)
+            return parsed["type"], parsed
+        except pickle.PickleError:
+            return None, dict()
+
     def leave(self):
-        self.send("gone:")
+        self.build_message("gone")
+
+    def ping_loop(self, dest):
+        self.build_message("ping", dest)
+        reactor.callLater(10, self.ping_loop, dest)
+
+    def pong_loop(self):
+        self.build_message("pong")
+        reactor.callLater(50, self.pong_loop)
+
+    def search(self, pkgfile):
+        print "multicast search: %s" % pkgfile
+        self.build_message("search", pkg=pkgfile)
 
     def startProtocol(self):
         # join our group, don't listen to ourself, and announce our presence
         self.transport.setLoopbackMode(False)
         self.transport.joinGroup(DEF_ADDR)
-        self.send("ping:")
+        self.transport.setTTL(2)
+        self.build_message("ping")
         reactor.addSystemEventTrigger("before", "shutdown", self.leave)
-
-    def send(self, message):
-        self.transport.write(message, MCAST)
-
-    message_re = re.compile('(.*?):(.*)')
-    def parse_message(self, message):
-        m = self.message_re.match(message)
-        if m:
-            return m.groups()[0], m.groups()[1]
-        else: 
-            return None, None
+        reactor.callLater(30, self.pong_loop)
 
     def datagramReceived(self, datagram, address):
         '''
@@ -195,22 +254,22 @@ class MulticastPackageFinder(DatagramProtocol):
         * gone - sender is about to shutdown and leave cluster
         '''
         addr = address[0]
-        print "received: %s %s" % (addr, datagram)
         type, contents = self.parse_message(datagram)
+        print "received: %s %s" % (addr, type)
+        pkg = contents.get("pkg")
         if type == "search":
-            path = find_package(contents)
+            path = find_package(pkg)
             if path != None:
-                self.send("found:%s" % contents)
+                self.build_message("found", pkg=pkg)
             else:
-                self.send("notfound:%s" % contents)
+                self.build_message("notfound", pkg=pkg)
         elif type == "found":
-            self.queue.found(contents, addr)
+            self.queue.found(pkg, addr)
         elif type == "notfound":
-            self.queue.notfound(contents, addr)
+            self.queue.notfound(pkg, addr)
         elif type == "ping":
-            self.queue.reset_servers()
             self.queue.add_server(addr)
-            self.send("pong:")
+            self.build_message("pong")
         elif type == "pong":
             self.queue.add_server(addr)
         elif type == "gone":
@@ -218,14 +277,15 @@ class MulticastPackageFinder(DatagramProtocol):
 
 
 class MulticastPackageResource(Resource):
-    def __init__(self, queue):
+    def __init__(self, queue, finder):
         self.queue = queue
+        self.finder = finder
         Resource.__init__(self)
 
     def deferred_search(self, request):
         pkgname = request.prepath[-1]
         qi = self.queue.new(pkgname)
-        find_remote_package(pkgname)
+        finder.search(pkgname)
         address = qi.wait()
         if address != None:
             print "found: %s %s" % (address, pkgname)
@@ -245,8 +305,9 @@ class MulticastPackageResource(Resource):
 
 # package serving and searching setup
 class SearchResource(Resource):
-    def __init__(self, queue):
+    def __init__(self, queue, finder):
         self.queue = queue
+        self.finder = finder
         Resource.__init__(self)
 
     def is_allowed(self, path):
@@ -267,7 +328,7 @@ class SearchResource(Resource):
     def getChild(self, path, request):
         # if we aren't at the last level, try to get there
         if len(request.postpath) > 0:
-            return SearchResource(self.queue)
+            return SearchResource(self.queue, self.finder)
         print "search request: %s" % path
         if not self.is_allowed(path):
             return NoResource()
@@ -276,7 +337,7 @@ class SearchResource(Resource):
         if localpath != None:
             return File(localpath)
         # ok, time to multicast search
-        return MulticastPackageResource(self.queue)
+        return MulticastPackageResource(self.queue, self.finder)
 
 
 class CacheResource(Resource):
@@ -289,13 +350,16 @@ class CacheResource(Resource):
 
 if __name__ == '__main__':
     log.startLogging(sys.stdout)
+
     queue = PackageRequestQueue()
+    finder = MulticastPackageFinder(queue)
+
     httproot = Resource()
-    httproot.putChild("search", SearchResource(queue))
+    httproot.putChild("search", SearchResource(queue, finder))
     httproot.putChild("cache", CacheResource())
 
     # get our various listeners, clients, etc. set up
-    mcastserver = reactor.listenMulticast(DEF_PORT, MulticastPackageFinder(queue))
+    mcastserver = reactor.listenMulticast(DEF_PORT, finder)
     httpserver = reactor.listenTCP(DEF_PORT, Site(httproot))
 
     reactor.run()
