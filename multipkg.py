@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 # Copyright (c) 2009 Dan McGee.
 # All rights reserved.
@@ -68,11 +68,10 @@ from twisted.application.internet import MulticastServer
 
 from twisted.python import log
 
-from twisted.web.resource import Resource
+from twisted.web.resource import NoResource, Resource
 from twisted.web.server import Site, NOT_DONE_YET
 from twisted.web.static import File
 from twisted.web.util import Redirect
-from twisted.web.error import NoResource
 
 DEF_ADDR = '239.0.0.156'
 DEF_PORT = 8954
@@ -134,7 +133,7 @@ class ServerCache(object):
 
 class PackageRequest(object):
     def __init__(self, queue, package, known):
-        print "new request: %s" % package
+        print("new request: %s" % package)
         self.event = threading.Event()
         self.queue = queue
         self.pkgname = package
@@ -143,8 +142,8 @@ class PackageRequest(object):
 
     def wait(self):
         self.event.wait(0.500)
-        print "request done waiting, address %s servers remaining %d" \
-                % (self.address, len(self.known_servers))
+        print("request done waiting, address %s servers remaining %d" \
+                % (self.address, len(self.known_servers)))
         queue.remove(self)
         return self.address
 
@@ -188,8 +187,8 @@ class PackageRequestQueue():
         self.server_cache.remove(server)
 
     def debug(self):
-        print repr(self.requests)
-        print repr(self.server_cache.known_servers)
+        print(repr(self.requests))
+        print(repr(self.server_cache.known_servers))
 
 
 def find_package(pkgfile):
@@ -229,7 +228,7 @@ class MulticastPackageFinder(DatagramProtocol):
         reactor.callLater(50, self.pong_loop)
 
     def search(self, pkgfile):
-        print "multicast search: %s" % pkgfile
+        print("multicast search: %s" % pkgfile)
         self.build_message("search", pkg=pkgfile)
 
     def startProtocol(self):
@@ -255,7 +254,7 @@ class MulticastPackageFinder(DatagramProtocol):
         '''
         addr = address[0]
         type, contents = self.parse_message(datagram)
-        print "received: %s %s" % (addr, type)
+        print("received: %s %s" % (addr, type))
         pkg = contents.get("pkg")
         if type == "search":
             path = find_package(pkg)
@@ -288,11 +287,11 @@ class MulticastPackageResource(Resource):
         finder.search(pkgname)
         address = qi.wait()
         if address != None:
-            print "found: %s %s" % (address, pkgname)
+            print("found: %s %s" % (address, pkgname))
             resource = Redirect("http://%s:%s/cache/%s" % (address, str(DEF_PORT), pkgname))
             resource.render(request)
         else:
-            print "not found: %s" % pkgname
+            print("not found: %s" % pkgname)
             resource = NoResource()
             resource.render(request)
         request.finish()
@@ -329,7 +328,7 @@ class SearchResource(Resource):
         # if we aren't at the last level, try to get there
         if len(request.postpath) > 0:
             return SearchResource(self.queue, self.finder)
-        print "search request: %s" % path
+        print("search request: %s" % path)
         if not self.is_allowed(path):
             return NoResource()
         # the local case is the easiest- check our own cache first
