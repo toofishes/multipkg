@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 
-# Copyright (c) 2009 Dan McGee.
+# Copyright (c) 2009-2011 Dan McGee <dan@archlinux.org>.
 # All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without

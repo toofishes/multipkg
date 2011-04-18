@@ -1,0 +1,36 @@
+multipkg
+--------
+
+multipkg is a Python script, using the Twisted framework, that helps share an
+Arch Linux/pacman package cache on a LAN. It is meant to be as KISS and low
+configuration as possible, and uses TCP multicast to accomplish this. The code
+is available under a BSD license.
+
+Note that the only use of this so far has been for my personal use. Thus, there
+are no command line configuration flags, and little else to make this generally
+useful. I have made it public to gauge interest and see if anyone else is
+interested in helping make this generally useful.
+
+Instructions:
+* Ensure you have 'twisted' installed.
+* Run ./multipkg.py (it doesn't daemonize...yet).
+* Add http://localhost:8954/search/$repo/os/i686 as your first mirror in either
+  pacman.conf or your mirrorlist.
+* Run ./multipkg.py on any additional computers in your LAN that should share
+  their package cache.
+* Run pacman as normal- you may see several "file not found" errors, but this
+  is normal. If a file is available anywhere on your local multicast network,
+  it will be retrieved.
+
+Important Note:
+This uses multicast. Thus, if your network segments are routed and not bridged,
+multicast traffic will likely not cross the barrier. A good example of this is
+your wireless/wired components of your home network- depending on your setup
+this script may or may not work.
+
+TODO:
+* Make port configurable
+* Make multicast address configurable
+* Allow for some manual endpoint configuration to be routable across subnets
+* Auto-detect CacheDirs rather than use hard-coded lists
+* Simplify the code as much as possible
