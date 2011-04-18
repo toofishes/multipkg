@@ -52,7 +52,9 @@
 
 from __future__ import with_statement
 
-import os, re, socket, threading
+import os
+import re
+import threading
 import time
 import sys
 
@@ -62,9 +64,7 @@ except ImportError:
     import pickle
 
 from twisted.internet.protocol import DatagramProtocol
-from twisted.internet import reactor, defer, threads
-
-from twisted.application.internet import MulticastServer
+from twisted.internet import reactor, threads
 
 from twisted.python import log
 
@@ -205,7 +205,7 @@ class MulticastPackageFinder(DatagramProtocol):
 
     def build_message(self, type, dest=DEF_ADDR, pkg=None):
         message = { "type": type, "dest": dest, "pkg": pkg }
-        message = pickle.dumps(message)
+        message = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
         addr = (dest, DEF_PORT)
         self.transport.write(message, addr)
 
@@ -298,7 +298,7 @@ class MulticastPackageResource(Resource):
         return request
 
     def render_GET(self, request):
-        d = threads.deferToThread(self.deferred_search, request)
+        threads.deferToThread(self.deferred_search, request)
         return NOT_DONE_YET
 
 
@@ -317,7 +317,7 @@ class SearchResource(Resource):
         you'd get no benefit when it comes to arch=any packages, which is the
         whole idea of them.
         '''
-        if path.endswith(".db.tar.gz"):
+        if path.endswith(".db"):
             return False
         oldskool = re.compile('.*-[0-9\.]+\.pkg\.tar\.gz$')
         if oldskool.match(path):
