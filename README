@@ -3,8 +3,8 @@ multipkg
 
 multipkg is a Python script, using the Twisted framework, that helps share an
 Arch Linux/pacman package cache on a LAN. It is meant to be as KISS and low
-configuration as possible, and uses TCP multicast to accomplish this. The code
-is available under a BSD license.
+configuration as possible, and uses UDP multicast searches to accomplish this.
+The code is available under a BSD license.
 
 Note that the only use of this so far has been for my personal use. Thus, there
 are no command line configuration flags, and little else to make this generally
