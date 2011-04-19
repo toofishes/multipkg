@@ -63,8 +63,11 @@ try:
 except ImportError:
     import pickle
 
+from twisted.internet import pollreactor
+pollreactor.install()
+
+from twisted.internet import threads
 from twisted.internet.protocol import DatagramProtocol
-from twisted.internet import reactor, threads
 
 from twisted.python import log
 
@@ -75,7 +78,6 @@ from twisted.web.util import Redirect
 
 DEF_ADDR = '239.0.0.156'
 DEF_PORT = 8954
-MCAST = (DEF_ADDR, DEF_PORT)
 
 cachedirs = [ "/var/cache/pacman/pkg",
               "/var/cache/makepkg/pkg" ]
@@ -144,11 +146,11 @@ class PackageRequest(object):
         self.event.wait(0.500)
         print("request done waiting, address %s servers remaining %d" \
                 % (self.address, len(self.known_servers)))
-        queue.remove(self)
+        self.queue.remove(self)
         return self.address
 
 
-class PackageRequestQueue():
+class PackageRequestQueue(object):
     requests = []
     server_cache = ServerCache()
     lock = threading.Lock()
@@ -186,10 +188,6 @@ class PackageRequestQueue():
     def remove_server(self, server):
         self.server_cache.remove(server)
 
-    def debug(self):
-        print(repr(self.requests))
-        print(repr(self.server_cache.known_servers))
-
 
 def find_package(pkgfile):
     for dir in cachedirs:
@@ -200,7 +198,8 @@ def find_package(pkgfile):
     return None
 
 class MulticastPackageFinder(DatagramProtocol):
-    def __init__(self, queue):
+    def __init__(self, reactor, queue):
+        self.reactor = reactor
         self.queue = queue
 
     def build_message(self, type, dest=DEF_ADDR, pkg=None):
@@ -221,11 +220,11 @@ class MulticastPackageFinder(DatagramProtocol):
 
     def ping_loop(self, dest):
         self.build_message("ping", dest)
-        reactor.callLater(10, self.ping_loop, dest)
+        self.reactor.callLater(10, self.ping_loop, dest)
 
     def pong_loop(self):
         self.build_message("pong")
-        reactor.callLater(50, self.pong_loop)
+        self.reactor.callLater(50, self.pong_loop)
 
     def search(self, pkgfile):
         print("multicast search: %s" % pkgfile)
@@ -237,8 +236,8 @@ class MulticastPackageFinder(DatagramProtocol):
         self.transport.joinGroup(DEF_ADDR)
         self.transport.setTTL(2)
         self.build_message("ping")
-        reactor.addSystemEventTrigger("before", "shutdown", self.leave)
-        reactor.callLater(30, self.pong_loop)
+        self.reactor.addSystemEventTrigger("before", "shutdown", self.leave)
+        self.reactor.callLater(30, self.pong_loop)
 
     def datagramReceived(self, datagram, address):
         '''
@@ -276,7 +275,8 @@ class MulticastPackageFinder(DatagramProtocol):
 
 
 class MulticastPackageResource(Resource):
-    def __init__(self, queue, finder):
+    def __init__(self, reactor, queue, finder):
+        self.reactor = reactor
         self.queue = queue
         self.finder = finder
         Resource.__init__(self)
@@ -284,7 +284,7 @@ class MulticastPackageResource(Resource):
     def deferred_search(self, request):
         pkgname = request.prepath[-1]
         qi = self.queue.new(pkgname)
-        finder.search(pkgname)
+        self.finder.search(pkgname)
         address = qi.wait()
         if address != None:
             print("found: %s %s" % (address, pkgname))
@@ -298,13 +298,15 @@ class MulticastPackageResource(Resource):
         return request
 
     def render_GET(self, request):
-        threads.deferToThread(self.deferred_search, request)
+        threads.deferToThreadPool(self.reactor, self.reactor.getThreadPool(),
+                self.deferred_search, request)
         return NOT_DONE_YET
 
 
 # package serving and searching setup
 class SearchResource(Resource):
-    def __init__(self, queue, finder):
+    def __init__(self, reactor, queue, finder):
+        self.reactor = reactor
         self.queue = queue
         self.finder = finder
         Resource.__init__(self)
@@ -327,7 +329,7 @@ class SearchResource(Resource):
     def getChild(self, path, request):
         # if we aren't at the last level, try to get there
         if len(request.postpath) > 0:
-            return SearchResource(self.queue, self.finder)
+            return SearchResource(self.reactor, self.queue, self.finder)
         print("search request: %s" % path)
         if not self.is_allowed(path):
             return NoResource()
@@ -336,7 +338,7 @@ class SearchResource(Resource):
         if localpath != None:
             return File(localpath)
         # ok, time to multicast search
-        return MulticastPackageResource(self.queue, self.finder)
+        return MulticastPackageResource(self.reactor, self.queue, self.finder)
 
 
 class CacheResource(Resource):
@@ -345,22 +347,26 @@ class CacheResource(Resource):
         if localpath != None:
             return File(localpath)
         return NoResource()
- 
 
-if __name__ == '__main__':
-    log.startLogging(sys.stdout)
 
+def run(port=DEF_PORT):
+    reactor = pollreactor.PollReactor()
     queue = PackageRequestQueue()
-    finder = MulticastPackageFinder(queue)
+    finder = MulticastPackageFinder(reactor, queue)
 
     httproot = Resource()
-    httproot.putChild("search", SearchResource(queue, finder))
+    httproot.putChild("search", SearchResource(reactor, queue, finder))
     httproot.putChild("cache", CacheResource())
 
     # get our various listeners, clients, etc. set up
-    mcastserver = reactor.listenMulticast(DEF_PORT, finder)
-    httpserver = reactor.listenTCP(DEF_PORT, Site(httproot))
+    mcastserver = reactor.listenMulticast(port, finder)
+    httpserver = reactor.listenTCP(port, Site(httproot))
 
     reactor.run()
+
+
+if __name__ == '__main__':
+    log.startLogging(sys.stdout)
+    run()
 
 # vim: set et:
