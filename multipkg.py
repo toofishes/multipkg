@@ -84,13 +84,9 @@ cachedirs = [ "/var/cache/pacman/pkg",
 
 
 class KnownServer(object):
-    def __init__(self, address, contact_address=None):
+    def __init__(self, address):
         self.last = time.time()
         self.address = address
-        if contact_address:
-            self.contact_address = contact_address
-        else:
-            self.contact_address = address
 
 
 class ServerCache(object):
@@ -105,15 +101,14 @@ class ServerCache(object):
     def __init__(self, timeout=60):
         self.timeout = timeout
 
-    def add(self, from_addr, contact_addr=None):
-        s = KnownServer(from_addr, contact_addr)
+    def add(self, from_addr):
+        s = KnownServer(from_addr)
         with self.lock:
             self.known_servers[from_addr] = s
 
-    def remove(self, from_addr, contact_addr=None):
+    def remove(self, from_addr):
         with self.lock:
-            if from_addr in self.known_servers:
-                del self.known_servers[from_addr]
+            self.known_servers.pop(from_addr, None)
 
     def get_current(self):
         '''
